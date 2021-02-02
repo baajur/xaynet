@@ -48,7 +48,10 @@ where
 
     async fn run(&mut self) -> Result<(), PhaseStateError> {
         self.process().await?;
+        self.broadcast().await
+    }
 
+    async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
         info!("broadcasting sum dictionary");
         let sum_dict = self
             .shared

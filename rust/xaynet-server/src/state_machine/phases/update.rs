@@ -54,7 +54,10 @@ where
 
     async fn run(&mut self) -> Result<(), PhaseStateError> {
         self.process().await?;
+        self.broadcast().await
+    }
 
+    async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
         info!("broadcasting the global seed dictionary");
         let seed_dict = self
             .shared
