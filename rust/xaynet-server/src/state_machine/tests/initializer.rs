@@ -1,6 +1,5 @@
 use serial_test::serial;
 
-use super::utils::{mask_settings, model_settings, pet_settings};
 #[cfg(feature = "model-persistence")]
 use crate::{
     settings::RestoreSettings,
@@ -16,6 +15,8 @@ use crate::{
     state_machine::{coordinator::CoordinatorState, StateMachineInitializer},
     storage::{tests::init_store, CoordinatorStorage},
 };
+
+use super::utils::{mask_settings, model_settings, pet_settings};
 
 #[cfg(feature = "model-persistence")]
 #[tokio::test]
