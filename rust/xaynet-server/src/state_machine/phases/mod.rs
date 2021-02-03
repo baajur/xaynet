@@ -8,7 +8,7 @@ mod sum2;
 mod unmask;
 mod update;
 
-use std::fmt;
+use std::{fmt, future::Future, pin::Pin};
 
 use async_trait::async_trait;
 use derive_more::Display;
@@ -72,6 +72,21 @@ where
     ///
     /// [module level documentation]: crate::state_machine
     async fn run(&mut self) -> Result<(), PhaseStateError>;
+
+    /// Performs the tasks of this phase.
+    fn process<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PhaseStateError>> + Send + 'a>>
+    where
+        Self: Sync + 'a;
+    // NOTE: we have to implement `async fn process()` manually for now (with the help of a macro to
+    // reduce boilerplate), because the `#[async_trait]` attribute macro has unroll order issues in
+    // combination with other macros, see: https://github.com/dtolnay/async-trait/issues/112
+
+    /// Purges the outstanding messages of this phase.
+    async fn purge(&mut self) -> Result<(), PhaseStateError> {
+        Ok(())
+    }
 
     /// Broadcasts data of this phase (nothing by default).
     ///
@@ -189,6 +204,102 @@ where
     pub(in crate::state_machine) shared: Shared<T>,
 }
 
+/// Implements [`Phase`]`::`[`process()`] for [`PhaseState`] with a given method body.
+///
+/// Hides as much boilerplate as possible, which is necessary due to the `#[async_trait]` issue.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_phase_process_for_phasestate {
+    (
+        async fn process(
+            $self_: ident : &mut PhaseState<$phase: ty, $storage: ty> $(,)?
+        ) -> Result<(), PhaseStateError>
+        $body: block
+    ) => {
+        fn process<'a>(
+            &'a mut self,
+        ) -> std::pin::Pin<std::boxed::Box<
+            dyn std::future::Future<Output =
+                std::result::Result<(), crate::state_machine::phases::PhaseStateError>
+            > + std::marker::Send + 'a
+        >>
+        where
+            crate::state_machine::phases::PhaseState<$phase, $storage>: std::marker::Sync + 'a,
+        {
+            async fn process_<S>(
+                $self_: &mut crate::state_machine::phases::PhaseState<$phase, S>,
+            ) -> std::result::Result<(), crate::state_machine::phases::PhaseStateError>
+            where
+                S: crate::storage::Storage,
+            $body
+
+            Box::pin(process_(self))
+        }
+    };
+}
+
+/// Implements [`Phase`]`::`[`process()`] for [`PhaseState`]`: `[`Handler`].
+///
+/// Circumvents the infeasibility of default trait impls due to the dependency on internal state.
+///
+/// - Processes at most `count.max` requests during the time interval `[now, now + time.min]`.
+/// - Processes requests until there are enough (ie `count.min`) for the time interval
+/// `[now + time.min, now + time.max]`.
+/// - Aborts if either all connections were dropped or not enough requests were processed until
+/// timeout.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_phase_process_for_phasestate_handler {
+    ($phase: ty, $storage: ty $(,)?) => {
+        paste::paste! {
+            crate::impl_phase_process_for_phasestate! {
+                async fn process(
+                    self_: &mut PhaseState<$phase, $storage>,
+                ) -> Result<(), PhaseStateError> {
+                    let phase = <
+                        crate::state_machine::phases::PhaseState<$phase, $storage>
+                        as crate::state_machine::phases::Phase<$storage>
+                    >::NAME;
+                    let crate::state_machine::coordinator::PhaseParameters { count, time } =
+                        self_.shared.state.[<$phase:lower>];
+                    tracing::info!("processing requests in {} phase", phase);
+                    tracing::debug!(
+                        "in {} phase for min {} and max {} seconds",
+                        phase, time.min, time.max,
+                    );
+                    self_.process_during(tokio::time::Duration::from_secs(time.min)).await?;
+
+                    let time_left = time.max - time.min;
+                    tokio::time::timeout(
+                        tokio::time::Duration::from_secs(time_left),
+                        self_.process_until_enough()
+                    ).await??;
+
+                    tracing::info!(
+                        "in total {} {} messages accepted (min {} and max {} required)",
+                        self_.private.accepted,
+                        phase,
+                        count.min,
+                        count.max,
+                    );
+                    tracing::info!(
+                        "in total {} {} messages rejected",
+                        self_.private.rejected,
+                        phase,
+                    );
+                    tracing::info!(
+                        "in total {} {} messages discarded (purged not included)",
+                        self_.private.discarded,
+                        phase,
+                    );
+
+                    std::result::Result::Ok(())
+                }
+            }
+        }
+    };
+}
+
 /// Implements all [`Handler`] methods for [`PhaseState`] except for [`handle_request()`].
 ///
 /// Circumvents the infeasibility of default trait impls due to the dependency on internal state.
@@ -230,70 +341,6 @@ macro_rules! impl_handler_for_phasestate {
                 self.private.discarded += 1;
                 tracing::debug!("{} {} messages discarded", self.private.discarded, phase);
                 crate::metric!(discarded: self.shared.state.round_id, phase);
-            }
-        }
-    };
-}
-
-/// Implements `process()` for [`PhaseState`]`: `[`Handler`]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! impl_process_for_phasestate_handler {
-    ($phase: ty) => {
-        paste::paste! {
-            impl<S> crate::state_machine::phases::PhaseState<$phase, S>
-            where
-                Self: crate::state_machine::phases::Handler
-                    + crate::state_machine::phases::Phase<S>,
-                S: crate::storage::Storage,
-            {
-                // Processes requests wrt the phase parameters.
-                //
-                // - Processes at most `count.max` requests during the time interval
-                // `[now, now + time.min]`.
-                // - Processes requests until there are enough (ie `count.min`) for the time
-                // interval `[now + time.min, now + time.max]`.
-                // - Aborts if either all connections were dropped or not enough requests were
-                // processed until timeout.
-                #[doc =
-                    "Processes requests wrt the phase parameters.\n\n"
-                    "- Processes at most `" [<$phase:lower>] ".count.max` requests during the time interval `[now, now + " [<$phase:lower>] ".time.min]`.\n"
-                    "- Processes requests until there are enough (ie `" [<$phase:lower>] ".count.min`) for the time interval `[now + " [<$phase:lower>] ".time.min, now + " [<$phase:lower>] ".time.max]`.\n"
-                    "- Aborts if either all connections were dropped or not enough requests were processed until timeout."
-                ]
-                async fn process(&mut self) -> Result<(), PhaseStateError> {
-                    let phase = <Self as crate::state_machine::phases::Phase<_>>::NAME;
-                    let crate::state_machine::coordinator::PhaseParameters { count, time } =
-                        self.shared.state.[<$phase:lower>];
-                    tracing::info!("processing requests in {} phase", phase);
-                    tracing::debug!(
-                        "in {} phase for min {} and max {} seconds",
-                        phase, time.min, time.max,
-                    );
-                    self.process_during(tokio::time::Duration::from_secs(time.min)).await?;
-
-                    let time_left = time.max - time.min;
-                    tokio::time::timeout(
-                        tokio::time::Duration::from_secs(time_left),
-                        self.process_until_enough()
-                    ).await??;
-
-                    tracing::info!(
-                        "in total {} {} messages accepted (min {} and max {} required)",
-                        self.private.accepted,
-                        phase,
-                        count.min,
-                        count.max,
-                    );
-                    tracing::info!("in total {} {} messages rejected", self.private.rejected, phase);
-                    tracing::info!(
-                        "in total {} {} messages discarded (purged not included)",
-                        self.private.discarded,
-                        phase,
-                    );
-
-                    Ok(())
-                }
             }
         }
     };

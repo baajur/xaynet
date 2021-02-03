@@ -7,6 +7,7 @@ use tracing::warn;
 use tracing::{error, info};
 
 use crate::{
+    impl_phase_process_for_phasestate,
     metric,
     metrics::{GlobalRecorder, Measurement},
     state_machine::{
@@ -51,20 +52,27 @@ where
     const NAME: PhaseName = PhaseName::Unmask;
 
     async fn run(&mut self) -> Result<(), PhaseStateError> {
-        self.emit_number_of_unique_masks_metrics();
-        let best_masks = self
-            .shared
-            .store
-            .best_masks()
-            .await
-            .map_err(UnmaskStateError::FetchBestMasks)?
-            .ok_or(UnmaskStateError::NoMask)?;
-        self.end_round(best_masks).await?;
-
-        #[cfg(feature = "model-persistence")]
-        self.save_global_model().await?;
-
+        self.process().await?;
         self.broadcast().await
+    }
+
+    impl_phase_process_for_phasestate! {
+        async fn process(self_: &mut PhaseState<Unmask, S>) -> Result<(), PhaseStateError> {
+            self_.emit_number_of_unique_masks_metrics();
+            let best_masks = self_
+                .shared
+                .store
+                .best_masks()
+                .await
+                .map_err(UnmaskStateError::FetchBestMasks)?
+                .ok_or(UnmaskStateError::NoMask)?;
+            self_.end_round(best_masks).await?;
+
+            #[cfg(feature = "model-persistence")]
+            self_.save_global_model().await?;
+
+            Ok(())
+        }
     }
 
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {

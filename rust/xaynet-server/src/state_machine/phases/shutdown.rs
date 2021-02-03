@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::{
+    impl_phase_process_for_phasestate,
     state_machine::{
         phases::{Phase, PhaseName, PhaseState, Shared},
         PhaseStateError,
@@ -21,10 +22,17 @@ where
     const NAME: PhaseName = PhaseName::Shutdown;
 
     async fn run(&mut self) -> Result<(), PhaseStateError> {
-        // clear the request channel
-        self.shared.request_rx.close();
-        while self.shared.request_rx.recv().await.is_some() {}
-        Ok(())
+        self.process().await
+    }
+
+    impl_phase_process_for_phasestate! {
+        async fn process(self_: &mut PhaseState<Shutdown, S>) -> Result<(), PhaseStateError> {
+            // clear the request channel
+            self_.shared.request_rx.close();
+            while self_.shared.request_rx.recv().await.is_some() {}
+
+            Ok(())
+        }
     }
 
     fn next(self) -> Option<StateMachine<S>> {

@@ -4,6 +4,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::{
+    impl_phase_process_for_phasestate,
     metric,
     metrics::Measurement,
     state_machine::{
@@ -40,30 +41,39 @@ where
     const NAME: PhaseName = PhaseName::Idle;
 
     async fn run(&mut self) -> Result<(), PhaseStateError> {
-        info!("updating the keys");
-        self.gen_round_keypair();
-
-        info!("updating round probabilities");
-        self.update_round_probabilities();
-
-        info!("updating round seed");
-        self.update_round_seed();
-
-        info!("storing new coordinator state");
-        self.shared
-            .store
-            .set_coordinator_state(&self.shared.state)
-            .await
-            .map_err(IdleStateError::SetCoordinatorState)?;
-
-        info!("removing phase dictionaries from previous round");
-        self.shared
-            .store
-            .delete_dicts()
-            .await
-            .map_err(IdleStateError::DeleteDictionaries)?;
-
+        self.process().await?;
         self.broadcast().await
+    }
+
+    impl_phase_process_for_phasestate! {
+        async fn process(self_: &mut PhaseState<Idle, S>) -> Result<(), PhaseStateError> {
+            info!("updating the keys");
+            self_.gen_round_keypair();
+
+            info!("updating round probabilities");
+            self_.update_round_probabilities();
+
+            info!("updating round seed");
+            self_.update_round_seed();
+
+            info!("storing new coordinator state");
+            self_
+                .shared
+                .store
+                .set_coordinator_state(&self_.shared.state)
+                .await
+                .map_err(IdleStateError::SetCoordinatorState)?;
+
+            info!("removing phase dictionaries from previous round");
+            self_
+                .shared
+                .store
+                .delete_dicts()
+                .await
+                .map_err(IdleStateError::DeleteDictionaries)?;
+
+            Ok(())
+        }
     }
 
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {

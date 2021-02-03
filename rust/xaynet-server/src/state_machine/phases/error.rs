@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 use crate::{
     event,
+    impl_phase_process_for_phasestate,
     state_machine::{
         phases::{
             idle::IdleStateError,
@@ -54,11 +55,17 @@ where
     const NAME: PhaseName = PhaseName::Error;
 
     async fn run(&mut self) -> Result<(), PhaseStateError> {
-        error!("phase state error: {}", self.private);
-        event!("Phase error", self.private.to_string());
-        self.wait_for_store_readiness().await;
+        self.process().await
+    }
 
-        Ok(())
+    impl_phase_process_for_phasestate! {
+        async fn process(self_: &mut PhaseState<PhaseStateError, S>) -> Result<(), PhaseStateError> {
+            error!("phase state error: {}", self_.private);
+            event!("Phase error", self_.private.to_string());
+            self_.wait_for_store_readiness().await;
+
+            Ok(())
+        }
     }
 
     fn next(self) -> Option<StateMachine<S>> {
