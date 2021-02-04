@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use crate::{
     impl_handler_for_phasestate,
     impl_phase_process_for_phasestate_handler,
+    impl_phase_purge_for_phasestate,
     state_machine::{
         events::DictionaryUpdate,
         phases::{Handler, Phase, PhaseName, PhaseState, PhaseStateError, Shared, Sum2},
@@ -52,11 +53,6 @@ where
 {
     const NAME: PhaseName = PhaseName::Update;
 
-    async fn run(&mut self) -> Result<(), PhaseStateError> {
-        self.process().await?;
-        self.broadcast().await
-    }
-
     impl_phase_process_for_phasestate_handler! { Update, S }
 
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
@@ -74,6 +70,8 @@ where
 
         Ok(())
     }
+
+    impl_phase_purge_for_phasestate! { Update, S }
 
     fn next(self) -> Option<StateMachine<S>> {
         Some(PhaseState::<Sum2, _>::new(self.shared, self.private.model_agg).into())

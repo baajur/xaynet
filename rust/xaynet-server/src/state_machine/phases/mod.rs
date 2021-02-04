@@ -8,7 +8,7 @@ mod sum2;
 mod unmask;
 mod update;
 
-use std::{fmt, future::Future, pin::Pin};
+use std::fmt;
 
 use async_trait::async_trait;
 use derive_more::Display;
@@ -26,6 +26,7 @@ pub use self::{
     update::{Update, UpdateStateError},
 };
 use crate::{
+    impl_phase_method_for_phasestate,
     metric,
     metrics::Measurement,
     state_machine::{
@@ -58,50 +59,44 @@ pub enum PhaseName {
 }
 
 /// A trait that must be implemented by a state in order to move to a next state.
+///
+/// See the [module level documentation] for more details.
+///
+/// [module level documentation]: crate::state_machine
 #[async_trait]
 pub trait Phase<S>
 where
     S: Storage,
+    Self: Sync,
 {
     /// The name of the current phase.
     const NAME: PhaseName;
 
-    /// Runs this phase to completion.
-    ///
-    /// See the [module level documentation] for more details.
-    ///
-    /// [module level documentation]: crate::state_machine
-    async fn run(&mut self) -> Result<(), PhaseStateError>;
-
-    /// Performs the tasks of this phase.
-    fn process<'a>(
-        &'a mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<(), PhaseStateError>> + Send + 'a>>
-    where
-        Self: Sync + 'a;
-    // NOTE: we have to implement `async fn process()` manually for now (with the help of a macro to
+    impl_phase_method_for_phasestate! {
+        /// Performs the tasks of this phase.
+        async fn process(&mut self_) -> Result<(), PhaseStateError>;
+    }
+    // NOTE: we have to implement `async fn process()` manually for now (with the help of macros to
     // reduce boilerplate), because the `#[async_trait]` attribute macro has unroll order issues in
     // combination with other macros, see: https://github.com/dtolnay/async-trait/issues/112
 
-    /// Purges the outstanding messages of this phase.
-    async fn purge(&mut self) -> Result<(), PhaseStateError> {
+    /// Purges the outstanding messages of this phase. Defaults to no purging.
+    fn purge(&mut self) -> Result<(), PhaseStateError> {
         Ok(())
     }
+    // TODO: add a filter service in PetMessageHandler that only passes through messages if
+    // the state machine is in one of the Sum, Update or Sum2 phases. then we can add a Purge
+    // phase here which gets broadcasted when the purge starts to prevent further incomming
+    // messages, which means we can use the default impl for all phases except Sum, Update and Sum.
+    // until then we have to have a purge impl in every phase, which also means that the metrics
+    // can be a bit off.
 
-    /// Broadcasts data of this phase (nothing by default).
-    ///
-    /// See the [module level documentation] for more details.
-    ///
-    /// [module level documentation]: crate::state_machine
+    /// Broadcasts data of this phase. Defaults to no broadcasting.
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
         Ok(())
     }
 
     /// Moves from this state to the next state.
-    ///
-    /// See the [module level documentation] for more details.
-    ///
-    /// [module level documentation]: crate::state_machine
     fn next(self) -> Option<StateMachine<S>>;
 }
 
@@ -204,43 +199,56 @@ where
     pub(in crate::state_machine) shared: Shared<T>,
 }
 
-/// Implements [`Phase`]`::`[`process()`] for [`PhaseState`] with a given method body.
+/// Implements a [`Phase`] method for [`PhaseState`] with a given method body.
 ///
 /// Hides as much boilerplate as possible, which is necessary due to the `#[async_trait]` issue.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! impl_phase_process_for_phasestate {
+macro_rules! impl_phase_method_for_phasestate {
+    // declaration
     (
-        async fn process(
-            $self_: ident : &mut PhaseState<$phase: ty, $storage: ty> $(,)?
-        ) -> Result<(), PhaseStateError>
-        $body: block
+        $(#[$attribute: meta])*
+        async fn $name: ident (&mut self_) -> Result<(), PhaseStateError>;
     ) => {
-        fn process<'a>(
+        $(#[$attribute])*
+        fn $name<'a>(
             &'a mut self,
         ) -> std::pin::Pin<std::boxed::Box<
             dyn std::future::Future<Output =
                 std::result::Result<(), crate::state_machine::phases::PhaseStateError>
             > + std::marker::Send + 'a
-        >>
-        where
-            crate::state_machine::phases::PhaseState<$phase, $storage>: std::marker::Sync + 'a,
-        {
-            async fn process_<S>(
-                $self_: &mut crate::state_machine::phases::PhaseState<$phase, S>,
+        >>;
+    };
+
+    // implementation
+    (
+        $(#[$attribute: meta])*
+        async fn $name: ident (
+            $self_: ident : &mut PhaseState<$phase: ty, $storage: ty> $(,)?
+        ) -> Result<(), PhaseStateError>
+        $body: block
+    ) => {
+        $(#[$attribute])*
+        fn $name<'a>(
+            &'a mut self,
+        ) -> std::pin::Pin<std::boxed::Box<
+            dyn std::future::Future<Output =
+                std::result::Result<(), crate::state_machine::phases::PhaseStateError>
+            > + std::marker::Send + 'a
+        >> {
+            async fn call<S_>(
+                $self_: &mut crate::state_machine::phases::PhaseState<$phase, S_>,
             ) -> std::result::Result<(), crate::state_machine::phases::PhaseStateError>
             where
-                S: crate::storage::Storage,
+                S_: crate::storage::Storage,
             $body
 
-            Box::pin(process_(self))
+            std::boxed::Box::pin(call(self))
         }
     };
 }
 
 /// Implements [`Phase`]`::`[`process()`] for [`PhaseState`]`: `[`Handler`].
-///
-/// Circumvents the infeasibility of default trait impls due to the dependency on internal state.
 ///
 /// - Processes at most `count.max` requests during the time interval `[now, now + time.min]`.
 /// - Processes requests until there are enough (ie `count.min`) for the time interval
@@ -252,13 +260,13 @@ macro_rules! impl_phase_process_for_phasestate {
 macro_rules! impl_phase_process_for_phasestate_handler {
     ($phase: ty, $storage: ty $(,)?) => {
         paste::paste! {
-            crate::impl_phase_process_for_phasestate! {
+            crate::impl_phase_method_for_phasestate! {
                 async fn process(
                     self_: &mut PhaseState<$phase, $storage>,
                 ) -> Result<(), PhaseStateError> {
                     let phase = <
-                        crate::state_machine::phases::PhaseState<$phase, $storage>
-                        as crate::state_machine::phases::Phase<$storage>
+                        crate::state_machine::phases::PhaseState<$phase, S_>
+                        as crate::state_machine::phases::Phase<S_>
                     >::NAME;
                     let crate::state_machine::coordinator::PhaseParameters { count, time } =
                         self_.shared.state.[<$phase:lower>];
@@ -296,6 +304,35 @@ macro_rules! impl_phase_process_for_phasestate_handler {
                     std::result::Result::Ok(())
                 }
             }
+        }
+    };
+}
+
+/// Implements [`Phase`]`::`[`purge()`] for [`PhaseState`].
+///
+/// Circumvents the infeasibility of default trait impls due to the dependency on internal state.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_phase_purge_for_phasestate {
+    ($phase: ty, $storage: ty $(,)?) => {
+        fn purge(
+            &mut self,
+        ) -> std::result::Result<(), crate::state_machine::phases::PhaseStateError> {
+            let phase = <
+                crate::state_machine::phases::PhaseState<$phase, $storage>
+                as crate::state_machine::phases::Phase<$storage>
+            >::NAME;
+            tracing::info!("purging outdated request from {} phase", phase);
+
+            while let std::option::Option::Some((_, span, resp_tx)) = self.try_next_request()? {
+                let _span_guard = span.enter();
+                crate::metric!(discarded: self.shared.state.round_id, phase);
+                let _ = resp_tx.send(
+                    std::result::Result::Err(crate::state_machine::RequestError::MessageDiscarded)
+                );
+            }
+
+            std::result::Result::Ok(())
         }
     };
 }
@@ -410,42 +447,47 @@ where
     }
 }
 
-impl<S, T> PhaseState<S, T>
+impl<'a, S, T> PhaseState<S, T>
 where
-    Self: Phase<T>,
+    S: Send + 'a,
     T: Storage,
+    Self: Phase<T> + Sync + 'a,
 {
-    /// Run the current phase to completion, then transition to the
-    /// next phase and return it.
+    /// Runs the current phase to completion.
+    ///
+    /// 1. Performs the phase tasks.
+    /// 2. Purges outdated phase messages.
+    /// 3. Broadcasts the phase data.
+    /// 4. Transitions to the next phase.
     pub async fn run_phase(mut self) -> Option<StateMachine<T>> {
         let phase = <Self as Phase<_>>::NAME;
         let span = error_span!("run_phase", phase = %phase);
 
         async move {
             info!("starting {} phase", phase);
-            info!("broadcasting {} phase event", phase);
             self.shared.events.broadcast_phase(phase);
             metric!(Measurement::Phase, phase as u8);
 
-            if let Err(err) = self.run().await {
+            if let Err(err) = self.process().await {
+                warn!("failed to perform the {} phase tasks", phase);
                 return Some(self.into_error_state(err));
             }
-            info!("{} phase ran successfully", phase);
 
-            debug!("purging outdated requests before transitioning");
-            if let Err(err) = self.purge_outdated_requests() {
-                warn!("failed to purge outdated requests");
-                // If we're already in the error state or shutdown state,
-                // ignore this error
-                match phase {
-                    PhaseName::Error | PhaseName::Shutdown => {
-                        debug!(
-                            "already in {} phase: ignoring error while purging outdated requests",
-                            phase,
-                        );
-                    }
-                    _ => return Some(self.into_error_state(err)),
+            if let Err(err) = self.purge() {
+                warn!("failed to purge outdated requests from the {} phase", phase);
+                if let PhaseName::Error | PhaseName::Shutdown = phase {
+                    debug!(
+                        "already in {} phase: ignoring error while purging outdated requests",
+                        phase,
+                    );
+                } else {
+                    return Some(self.into_error_state(err));
                 }
+            }
+
+            if let Err(err) = self.broadcast().await {
+                warn!("failed to broadcast the {} phase data", phase);
+                return Some(self.into_error_state(err));
             }
 
             info!("transitioning to the next phase");
@@ -453,20 +495,6 @@ where
         }
         .instrument(span)
         .await
-    }
-
-    /// Process all the pending requests that are now considered
-    /// outdated. This happens at the end of each phase, before
-    /// transitioning to the next phase.
-    fn purge_outdated_requests(&mut self) -> Result<(), PhaseStateError> {
-        let phase = <Self as Phase<_>>::NAME;
-        info!("discarding outdated request");
-        while let Some((_, span, resp_tx)) = self.try_next_request()? {
-            let _span_guard = span.enter();
-            metric!(discarded: self.shared.state.round_id, phase);
-            let _ = resp_tx.send(Err(RequestError::MessageDiscarded));
-        }
-        Ok(())
     }
 }
 

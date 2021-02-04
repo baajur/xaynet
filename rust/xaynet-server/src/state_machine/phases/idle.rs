@@ -4,7 +4,8 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::{
-    impl_phase_process_for_phasestate,
+    impl_phase_method_for_phasestate,
+    impl_phase_purge_for_phasestate,
     metric,
     metrics::Measurement,
     state_machine::{
@@ -40,12 +41,7 @@ where
 {
     const NAME: PhaseName = PhaseName::Idle;
 
-    async fn run(&mut self) -> Result<(), PhaseStateError> {
-        self.process().await?;
-        self.broadcast().await
-    }
-
-    impl_phase_process_for_phasestate! {
+    impl_phase_method_for_phasestate! {
         async fn process(self_: &mut PhaseState<Idle, S>) -> Result<(), PhaseStateError> {
             info!("updating the keys");
             self_.gen_round_keypair();
@@ -75,6 +71,8 @@ where
             Ok(())
         }
     }
+
+    impl_phase_purge_for_phasestate! { Idle, S }
 
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
         let events = &mut self.shared.events;
@@ -185,7 +183,8 @@ mod tests {
         assert_eq!(id, 0);
 
         let mut idle_phase = PhaseState::<Idle, _>::new(shared);
-        idle_phase.run().await.unwrap();
+        idle_phase.process().await.unwrap();
+        idle_phase.broadcast().await.unwrap();
 
         let id = keys.get_latest().round_id;
         assert_eq!(id, 1);

@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use crate::{
     impl_handler_for_phasestate,
     impl_phase_process_for_phasestate_handler,
+    impl_phase_purge_for_phasestate,
     state_machine::{
-        phases::{Handler, Phase, PhaseName, PhaseState, PhaseStateError, Shared, Unmask},
+        phases::{Handler, Phase, PhaseName, PhaseState, Shared, Unmask},
         requests::{StateMachineRequest, Sum2Request},
         RequestError,
         StateMachine,
@@ -37,11 +38,9 @@ where
 {
     const NAME: PhaseName = PhaseName::Sum2;
 
-    async fn run(&mut self) -> Result<(), PhaseStateError> {
-        self.process().await
-    }
-
     impl_phase_process_for_phasestate_handler! { Sum2, S }
+
+    impl_phase_purge_for_phasestate! { Sum2, S }
 
     fn next(self) -> Option<StateMachine<S>> {
         Some(PhaseState::<Unmask, _>::new(self.shared, self.private.model_agg).into())

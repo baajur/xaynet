@@ -7,6 +7,7 @@ use tracing::info;
 use crate::{
     impl_handler_for_phasestate,
     impl_phase_process_for_phasestate_handler,
+    impl_phase_purge_for_phasestate,
     state_machine::{
         events::DictionaryUpdate,
         phases::{Handler, Phase, PhaseName, PhaseState, PhaseStateError, Shared, Update},
@@ -46,12 +47,9 @@ where
 {
     const NAME: PhaseName = PhaseName::Sum;
 
-    async fn run(&mut self) -> Result<(), PhaseStateError> {
-        self.process().await?;
-        self.broadcast().await
-    }
-
     impl_phase_process_for_phasestate_handler! { Sum, S }
+
+    impl_phase_purge_for_phasestate! { Sum, S }
 
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
         info!("broadcasting sum dictionary");

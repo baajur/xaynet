@@ -7,7 +7,8 @@ use tracing::warn;
 use tracing::{error, info};
 
 use crate::{
-    impl_phase_process_for_phasestate,
+    impl_phase_method_for_phasestate,
+    impl_phase_purge_for_phasestate,
     metric,
     metrics::{GlobalRecorder, Measurement},
     state_machine::{
@@ -51,12 +52,7 @@ where
 {
     const NAME: PhaseName = PhaseName::Unmask;
 
-    async fn run(&mut self) -> Result<(), PhaseStateError> {
-        self.process().await?;
-        self.broadcast().await
-    }
-
-    impl_phase_process_for_phasestate! {
+    impl_phase_method_for_phasestate! {
         async fn process(self_: &mut PhaseState<Unmask, S>) -> Result<(), PhaseStateError> {
             self_.emit_number_of_unique_masks_metrics();
             let best_masks = self_
@@ -74,6 +70,8 @@ where
             Ok(())
         }
     }
+
+    impl_phase_purge_for_phasestate! { Unmask, S }
 
     async fn broadcast(&mut self) -> Result<(), PhaseStateError> {
         if let Some(ref global_model) = self.shared.state.global_model {
